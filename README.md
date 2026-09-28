@@ -654,6 +654,31 @@ Semantics:
 
 The rules live in one place, `tangle_cli.schema_validation`: `check_annotations(mapping, policy=..., error_cls=...)` applied under a named `AnnotationPolicy`. `CALLER_ANNOTATION_POLICY` is the strict input policy described above; `DOCUMENT_ANNOTATION_POLICY` is the lenient policy every pipeline document is validated against (scalar-or-null values, no key rules), matching the schema and hand-authored YAML. Only the caller-supplied input surface is strict: existing documents are accepted exactly as before, and the document check still runs on the merged result, so annotations reaching the output by any route are validated.
 
+##### Root pipeline labels
+
+`@pipeline(labels={...})` writes the compiled pipeline's root `metadata.labels` block — a block separate from `annotations`:
+
+```python
+@pipeline(
+    "Search signals",
+    labels={"team": "discovery", "domain": "search-signals", "stage": "analysis"},
+)
+def search_signals() -> Out[str]:
+    ...
+```
+
+Semantics:
+
+- **`str -> str`, and stricter than annotations.** Both the dehydrated and the pipeline schema type `metadata.labels` as `additionalProperties: {"type": "string"}`, whereas `metadata.annotations` also admits numbers, booleans and null. A non-mapping argument, a non-string key or value, an empty key, or a template delimiter (`{{`, `{%`, `{#`) raises `InvalidPipelineLabelsError` (a `CompileError`). Diagnostics name the key and the type and never echo a value.
+- **The `system/` prefix is allowed here.** That prefix is reserved for Tangle's own *annotations*; nothing reserves a label prefix, so rejecting one would refuse a document both schemas accept.
+- **Written before `annotations`** in the `metadata` block, whichever order the keywords were passed in.
+- **Author key order is preserved** inside the block; it is not sorted.
+- **Omitted, `{}` or `None` is a no-op**, byte for byte — a pipeline that does not use labels compiles exactly as before.
+- **Root only.** A `subpipeline` child keeps exactly what its own `@pipeline` declared, so child sidecar names, bytes and component digests are unaffected. A child that wants labels declares its own.
+- **Descriptive only.** Nothing in the CLI, the hydrator or the generated API client reads labels; they appear only in the schemas and in `MetadataSpec`. They are not part of compile identity or the overrides fingerprint, and cannot influence placement, routing, scheduling or run identity.
+
+There is no `pipeline_labels` compile keyword mirroring `pipeline_annotations`. Annotations got one because the varying part of that block (environment, owner) comes from a caller's per-environment config; no such need exists for labels today, and the rules are already shared, so adding one later is a small change.
+
 A distribution that reads these annotations from its own config file should call `check_annotations(mapping, policy=CALLER_ANNOTATION_POLICY, error_cls=...)` at config-parse time — passing its own error type and adding the config path and key to the message — so one user mistake produces one diagnostic instead of two competing ones. The compiler's own call is then the backstop for anything arriving by another route.
 
 ##### Declaring graph inputs and outputs from the body

@@ -55,6 +55,15 @@ class InvalidGraphIoError(CompileError):
     """
 
 
+class InvalidPipelineLabelsError(CompileError):
+    """Raised on a malformed ``@pipeline(labels=...)`` mapping.
+
+    Separate from :class:`InvalidPipelineAnnotationsError` so a caller can
+    tell which metadata block it got wrong. Messages name the key and the
+    type, never the value.
+    """
+
+
 class InvalidPipelineAnnotationsError(CompileError):
     """Raised on a malformed caller-supplied ``pipeline_annotations`` mapping.
 

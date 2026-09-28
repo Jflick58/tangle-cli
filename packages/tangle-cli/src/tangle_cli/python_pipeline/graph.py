@@ -67,6 +67,7 @@ class GraphBuilder:
     name: str
     description: str | None = None
     annotations: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
     inputs: list[dict[str, Any]] = field(default_factory=list)
     outputs: list[dict[str, Any]] = field(default_factory=list)
     # MULTI-output map (Decision D): ``{output_name: EdgeRef}`` in field
