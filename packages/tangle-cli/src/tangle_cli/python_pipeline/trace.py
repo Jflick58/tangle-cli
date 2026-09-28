@@ -242,6 +242,7 @@ def trace_pipeline(
         name=pipeline_fn.name,
         description=pipeline_fn.description,
         annotations=dict(pipeline_fn.annotations),
+        labels=dict(pipeline_fn.labels),
     )
     # AST pre-pass: needed by CallableRef.__call__ to derive task IDs
     # from LHS variable names. Stashed on the builder so the contextvar

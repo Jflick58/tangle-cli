@@ -257,6 +257,22 @@ CALLER_ANNOTATION_POLICY = AnnotationPolicy(
     reject_non_mapping=True,
 )
 
+#: Applied to a ``@pipeline(labels=...)`` mapping. Strict ``str -> str``
+#: because both schemas type ``metadata.labels`` as
+#: ``additionalProperties: {"type": "string"}`` — narrower than
+#: ``metadata.annotations``, which also admits numbers, booleans and null.
+#: ``reject_reserved_key_prefix`` is deliberately OFF: ``system/`` is
+#: documented as reserved for Tangle's own ANNOTATIONS, and nothing reserves
+#: a label prefix, so enabling it would refuse a document the schema accepts.
+PIPELINE_LABELS_POLICY = AnnotationPolicy(
+    label="labels",
+    require_string_values=True,
+    require_string_keys=True,
+    require_non_empty_keys=True,
+    reject_template_delimiters=True,
+    reject_non_mapping=True,
+)
+
 
 def check_annotations(
     annotations: Any,

@@ -82,9 +82,15 @@ def emit_pipeline(g: GraphBuilder) -> tuple[dict[str, Any], set[str]]:
     if g.description:
         out["description"] = g.description
 
-    if g.annotations:
-        # metadata.annotations preserves user-specified order.
-        out["metadata"] = {"annotations": dict(g.annotations)}
+    if g.labels or g.annotations:
+        # Both blocks preserve user-specified key order. ``labels`` is
+        # written first, matching the corpus majority.
+        metadata: dict[str, Any] = {}
+        if g.labels:
+            metadata["labels"] = dict(g.labels)
+        if g.annotations:
+            metadata["annotations"] = dict(g.annotations)
+        out["metadata"] = metadata
 
     if g.inputs:
         out["inputs"] = list(g.inputs)

@@ -18,8 +18,10 @@ from tangle_cli.editor_layout import (
     validate_flow_direction,
 )
 
+from tangle_cli.schema_validation import PIPELINE_LABELS_POLICY, check_annotations
+
 from . import emit
-from .errors import InvalidEditorLayoutError
+from .errors import InvalidEditorLayoutError, InvalidPipelineLabelsError
 from .graph import GraphBuilder
 
 
@@ -39,6 +41,9 @@ class PipelineFn:
     description: str | None = None
     config_path: str | None = None  # path relative to caller_dir
     annotations: dict[str, Any] = field(default_factory=dict)
+    # ``metadata.labels`` — a separate block from annotations, and typed
+    # ``str -> str`` by both schemas.
+    labels: dict[str, str] = field(default_factory=dict)
     task_annotations: dict[str, Any] = field(default_factory=dict)
     caller_dir: Path | None = None
     # Convention for the single Out[T] slot's name. Defaults to the PoC
@@ -135,6 +140,7 @@ def pipeline(
     description: str | None = None,
     config: str | None = None,
     annotations: dict[str, Any] | None = None,
+    labels: dict[str, str] | None = None,
     task_annotations: dict[str, Any] | None = None,
     flow_direction: str | None = None,
     output_name: str = "wait_for_output",
@@ -156,6 +162,10 @@ def pipeline(
             time so ``--override key=value`` pairs can merge in.
         annotations: ``metadata.annotations`` block (e.g. ``version``,
             ``author``).
+        labels: ``metadata.labels`` block (e.g. ``team``, ``domain``,
+            ``stage``). A separate block from ``annotations``, restricted
+            by both schemas to string values. Descriptive only, and root
+            only — a ``subpipeline`` child declares its own.
         flow_direction: Editor rendering direction, written as the
             ``editor.flow-direction`` root annotation
             (``"left-to-right"`` / ``"top-to-bottom"``). Sugar over
@@ -180,6 +190,11 @@ def pipeline(
             caller_dir = None
 
         merged_annotations = dict(annotations or {})
+        checked_labels = check_annotations(
+            labels,
+            policy=PIPELINE_LABELS_POLICY,
+            error_cls=InvalidPipelineLabelsError,
+        )
         if flow_direction is not None:
             # Assigned after the mapping: the typed keyword wins, and an
             # existing key keeps its position in key order.
@@ -193,6 +208,7 @@ def pipeline(
             description=description,
             config_path=config,
             annotations=merged_annotations,
+            labels=checked_labels,
             task_annotations=dict(task_annotations or {}),
             caller_dir=caller_dir,
             output_name=output_name,
