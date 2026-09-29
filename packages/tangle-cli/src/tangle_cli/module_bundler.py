@@ -240,7 +240,20 @@ class ModuleBundler:
 
     @staticmethod
     def encode(module_sources: dict[str, str]) -> str | None:
-        """Compress and base64-encode a dict of module sources for embedding.
+        """Compress and Base85-encode a dict of module sources for embedding.
+
+        The encoded blob travels inside a single container command-line
+        argument, and Linux rejects any single argument longer than
+        ``MAX_ARG_STRLEN`` (128 KiB) with ``E2BIG`` before the program starts.
+        bz2 compresses Python source markedly better than zlib, and Base85
+        expands bytes by 25% rather than Base64's 33%. Both are in the
+        standard library, so the generated component gains no dependency.
+        The Base85 alphabet contains no quotes or backslashes, so the blob is
+        safe inside the Python string literal ``build_injection`` emits.
+        The generated program is passed to ``sh`` as ``$0`` and written out
+        with ``printf``, so its characters are never shell-interpreted.
+        Each generated component embeds its own decoder, so no older
+        component depends on this format.
 
         Modules are sorted so that dependencies execute before dependents.
         We perform a topological sort over the module-level import graph
@@ -259,27 +272,29 @@ class ModuleBundler:
             module_sources: ``{module_name: source_text}`` dict.
 
         Returns:
-            Base64-encoded string, or ``None`` if *module_sources* is empty.
+            Base85-encoded bz2 string, or ``None`` if *module_sources* is empty.
         """
         if not module_sources:
             return None
-        import zlib
+        import bz2
         ordered_names = _topological_order(module_sources)
         ordered = {name: module_sources[name] for name in ordered_names}
         sources_json = json.dumps(ordered)
-        compressed = zlib.compress(sources_json.encode(), level=9)
-        return base64.b64encode(compressed).decode("ascii")
+        compressed = bz2.compress(sources_json.encode(), compresslevel=9)
+        return base64.b85encode(compressed).decode("ascii")
 
     @staticmethod
     def build_injection(bundled_modules_b64: str) -> str:
         """Return a Python snippet that decodes and injects bundled modules into ``sys.modules``.
 
         The snippet is self-contained: it imports ``sys``, ``types``, ``base64``,
-        ``json``, and ``zlib``, then decompresses the embedded blob and registers
+        ``json``, and ``bz2``, then decompresses the embedded blob and registers
         each module via ``types.ModuleType`` + ``exec``.
 
         Args:
-            bundled_modules_b64: Base64 string produced by ``encode``.
+            bundled_modules_b64: Encoded string produced by ``encode``. The
+                name predates the Base85 encoding and is kept because callers
+                pass it by keyword.
         """
         return textwrap.dedent(f"""\
             # --- Inject local dependency modules from embedded source ---
@@ -287,9 +302,9 @@ class ModuleBundler:
             import types
             import base64
             import json
-            import zlib
+            import bz2
 
-            _EMBEDDED_MODULES = json.loads(zlib.decompress(base64.b64decode({repr(bundled_modules_b64)})))
+            _EMBEDDED_MODULES = json.loads(bz2.decompress(base64.b85decode({repr(bundled_modules_b64)})))
             # Pass 1: register all modules in sys.modules (without executing source)
             # so transitive imports between bundled modules can resolve in any order.
             _module_objs = {{}}

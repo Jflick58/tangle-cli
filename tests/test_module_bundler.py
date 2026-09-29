@@ -9,10 +9,13 @@ before its dependency, breaking module-level references like
 from __future__ import annotations
 
 import base64
+import bz2
 import json
 import textwrap
 import zlib
+from pathlib import Path
 
+import tangle_cli
 from tangle_cli.module_bundler import (
     ModuleBundler,
     _import_node_targets,
@@ -22,9 +25,39 @@ from tangle_cli.module_bundler import (
 )
 
 
-def _decode(b64: str) -> dict[str, str]:
+def _decode(encoded: str) -> dict[str, str]:
     """Mirror of the runtime injection's decompress step."""
-    return json.loads(zlib.decompress(base64.b64decode(b64)))
+    return json.loads(bz2.decompress(base64.b85decode(encoded)))
+
+
+class TestEncodedPayload:
+    """The payload rides in one command-line argument, capped at 128 KiB by Linux."""
+
+    @staticmethod
+    def _realistic_sources() -> dict[str, str]:
+        """This package's own modules: a large, real body of Python source."""
+        root = Path(tangle_cli.__file__).parent
+        return {f"tangle_cli.{p.stem}": p.read_text(encoding="utf-8") for p in sorted(root.glob("*.py"))}
+
+    def test_round_trips_realistic_sources(self):
+        sources = self._realistic_sources()
+        encoded = ModuleBundler.encode(sources)
+        assert encoded is not None
+        assert _decode(encoded) == {name: sources[name] for name in _topological_order(sources)}
+
+    def test_is_safe_inside_the_emitted_string_literal(self):
+        encoded = ModuleBundler.encode(self._realistic_sources())
+        assert encoded is not None
+        assert not set(encoded) & {"'", '"', "\\", "\n"}
+        assert repr(encoded) == f"'{encoded}'"
+
+    def test_is_smaller_than_zlib_base64(self):
+        sources = self._realistic_sources()
+        encoded = ModuleBundler.encode(sources)
+        assert encoded is not None
+        ordered = {name: sources[name] for name in _topological_order(sources)}
+        legacy = base64.b64encode(zlib.compress(json.dumps(ordered).encode(), level=9))
+        assert len(encoded) < 0.85 * len(legacy)
 
 
 class TestTopologicalOrder:

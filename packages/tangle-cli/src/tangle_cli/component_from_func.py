@@ -1937,7 +1937,8 @@ def build_component_dict(
         dependencies: List of pip dependencies
         annotations: Metadata annotations dict
         mode: Generation mode
-        bundled_modules_b64: Base64-encoded pickled modules (bundle mode only)
+        bundled_modules_b64: Encoded module sources from ``ModuleBundler.encode``
+            (bundle mode only)
 
     Returns:
         Dict representing the full component YAML structure.

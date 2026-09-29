@@ -48,9 +48,9 @@ implementation:
       import types
       import base64
       import json
-      import zlib
+      import bz2
 
-      _EMBEDDED_MODULES = json.loads(zlib.decompress(base64.b64decode('eNqrVspIzSlILSpWslJQUtJRgHH1Sksyc8CCMXkpqWkKyTmpiXkaJakVJZpWMXkKQFCUWlJalKcAEtIrLinKLNDQ1MvJL08t0tCMyVOqBQAjHx2s')))
+      _EMBEDDED_MODULES = json.loads(bz2.decompress(base64.b85decode('LRx4!F+o`-Q(18$<j?>BEL(s;08nKB5C8-(W!}ml08pbtKmY&@Q`1D*LnBQ#lOTYi2+ZHDgR)PvJA0By)WPshuE^e4Vq$U&uyMDL7ibmAPazAg3?vD18nI+p<j2(fUC9*TLP5lflRy')))
       # Pass 1: register all modules in sys.modules (without executing source)
       # so transitive imports between bundled modules can resolve in any order.
       _module_objs = {}
