@@ -8,6 +8,7 @@ import yaml
 
 from tangle_cli import utils
 from tangle_cli.pipeline_dehydrator import (
+    ComponentFilenameTooLongError,
     DehydrateChoice,
     Jinja2ExportResult,
     PipelineDehydrator,
@@ -16,14 +17,19 @@ from tangle_cli.pipeline_dehydrator import (
 )
 
 
-def _leaf_spec(name: str, *, canonical_url: str | None = None) -> dict[str, Any]:
+def _leaf_spec(
+    name: str, *, canonical_url: str | None = None, marker: str | None = None
+) -> dict[str, Any]:
     annotations = {}
     if canonical_url:
         annotations["canonical_location"] = canonical_url
+    container: dict[str, Any] = {"image": "example/image:latest"}
+    if marker:
+        container["command"] = [marker]
     return {
         "name": name,
         "metadata": {"annotations": annotations},
-        "implementation": {"container": {"image": "example/image:latest"}},
+        "implementation": {"container": container},
     }
 
 
@@ -33,6 +39,32 @@ def _task(name: str, digest: str, *, canonical_url: str | None = None) -> dict[s
 
 def _pipeline(tasks: dict[str, Any]) -> dict[str, Any]:
     return {"name": "Pipeline", "implementation": {"graph": {"tasks": tasks}}}
+
+
+def _extracted_name(name: str, *, canonical_url: str | None = None, marker: str | None = None) -> str:
+    """Filename ``_save_component_to_file`` gives the leaf component *name*.
+
+    Derived rather than hard-coded so these expectations assert an exact
+    filename without being rewritten whenever a fixture spec changes.
+    """
+    spec = _leaf_spec(name, canonical_url=canonical_url, marker=marker)
+    stem = name.lower().replace(" ", "_")
+    return f"{stem}-{utils.compute_spec_digest(spec)}.yaml"
+
+
+def _file_ref(name: str, marker: str, digest: str | None = None) -> dict[str, Any]:
+    ref: dict[str, Any] = {"name": name, "spec": _leaf_spec(name, marker=marker)}
+    if digest is not None:
+        ref["digest"] = digest
+    return {"componentRef": ref}
+
+
+def _extract(tmp_path: Path, tasks: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    dehydrator = PipelineDehydrator(
+        {"": DehydrateChoice.FILE}, output_file=tmp_path / "out.yaml", **kwargs
+    )
+    result = dehydrator.dehydrate(_pipeline(tasks))
+    return result["implementation"]["graph"]["tasks"]
 
 
 class FakeClient:
@@ -182,8 +214,9 @@ def test_pipeline_dehydrator_auto_falls_back_to_file_when_client_creation_fails(
     ).dehydrate(data)
 
     tasks = result["implementation"]["graph"]["tasks"]
-    assert tasks["local"]["componentRef"] == {"url": "file://./components/local_only.yaml"}
-    saved_component = yaml.safe_load((tmp_path / "components" / "local_only.yaml").read_text(encoding="utf-8"))
+    extracted = _extracted_name("Local Only")
+    assert tasks["local"]["componentRef"] == {"url": f"file://./components/{extracted}"}
+    saved_component = yaml.safe_load((tmp_path / "components" / extracted).read_text(encoding="utf-8"))
     assert saved_component["name"] == "Local Only"
 
 
@@ -206,9 +239,10 @@ def test_pipeline_dehydrator_auto_uses_url_digest_then_file(tmp_path: Path) -> N
     tasks = result["implementation"]["graph"]["tasks"]
     assert tasks["canonical"]["componentRef"] == {"url": "https://example.test/canonical.yaml"}
     assert tasks["published"]["componentRef"] == {"digest": "digest-found"}
-    assert tasks["local"]["componentRef"] == {"url": "file://./components/local_only.yaml"}
+    extracted = _extracted_name("Local Only")
+    assert tasks["local"]["componentRef"] == {"url": f"file://./components/{extracted}"}
     assert client.calls == ["digest-found", "digest-missing"]
-    saved_component = yaml.safe_load((tmp_path / "components" / "local_only.yaml").read_text(encoding="utf-8"))
+    saved_component = yaml.safe_load((tmp_path / "components" / extracted).read_text(encoding="utf-8"))
     assert saved_component["name"] == "Local Only"
 
 
@@ -226,10 +260,11 @@ def test_pipeline_dehydrator_auto_extracts_subgraphs_and_rewrites_relative_urls(
 
     subgraph_file = tmp_path / "subgraphs" / "nested_subgraph_0.yaml"
     subgraph = yaml.safe_load(subgraph_file.read_text(encoding="utf-8"))
+    extracted = _extracted_name("Inner Leaf")
     assert subgraph["implementation"]["graph"]["tasks"]["leaf"]["componentRef"] == {
-        "url": "file://./../components/inner_leaf.yaml"
+        "url": f"file://./../components/{extracted}"
     }
-    assert yaml.safe_load((tmp_path / "components" / "inner_leaf.yaml").read_text(encoding="utf-8"))["name"] == "Inner Leaf"
+    assert yaml.safe_load((tmp_path / "components" / extracted).read_text(encoding="utf-8"))["name"] == "Inner Leaf"
 
 
 def test_pipeline_dehydrator_exports_jinja2_template_and_config(tmp_path: Path) -> None:
@@ -280,13 +315,82 @@ def test_pipeline_dehydrator_uses_uri_hooks_for_read_write_and_extracted_compone
         uri_writers={"mem": writer},
     ).dehydrate_file("mem://bucket/input.yaml", "mem://bucket/out/pipeline.yaml")
 
-    assert result["implementation"]["graph"]["tasks"]["leaf"]["componentRef"] == {
-        "url": "mem://bucket/out/components/remote_leaf.yaml"
-    }
-    assert yaml.safe_load(writes["mem://bucket/out/components/remote_leaf.yaml"])["name"] == "Remote Leaf"
+    extracted = f"mem://bucket/out/components/{_extracted_name('Remote Leaf')}"
+    assert result["implementation"]["graph"]["tasks"]["leaf"]["componentRef"] == {"url": extracted}
+    assert yaml.safe_load(writes[extracted])["name"] == "Remote Leaf"
     assert yaml.safe_load(writes["mem://bucket/out/pipeline.yaml"]) == result
 
 
 def test_pipeline_dehydrator_helper_exports_are_importable() -> None:
     assert _extract_input_defaults({"inputs": {"User Name": {"default": "Ada"}}}) == {"user_name": "Ada"}
     assert _build_subgraph_processing_queue(_pipeline({}))[0] == (0, "Pipeline")
+
+
+def test_two_components_sharing_a_name_are_not_written_over_each_other(tmp_path: Path) -> None:
+    """Extraction is addressed by spec content, not by display name.
+
+    Naming files after the component alone let the second component overwrite
+    the first and redirected both tasks onto the survivor. Both refs carry the
+    same digest here on purpose: a locator digest is not proof of content.
+    """
+    stale = "d" * 64
+    tasks = _extract(
+        tmp_path,
+        {"a": _file_ref("Leaf", "first", stale), "b": _file_ref("Leaf", "second", stale)},
+    )
+
+    assert tasks["a"]["componentRef"]["url"] != tasks["b"]["componentRef"]["url"]
+    payloads = sorted(
+        yaml.safe_load(path.read_text(encoding="utf-8"))["implementation"]["container"]["command"][0]
+        for path in (tmp_path / "components").glob("*")
+    )
+    assert payloads == ["first", "second"]
+
+
+@pytest.mark.parametrize("other_digest", ["b" * 64, "unknown", None])
+def test_one_spec_is_written_once_whatever_digest_the_refs_carry(
+    tmp_path: Path, other_digest: str | None
+) -> None:
+    """Equal specs share one file, named from the canonical spec digest."""
+    tasks = _extract(
+        tmp_path,
+        {
+            "a": _file_ref("Leaf", "payload", "a" * 64),
+            "b": _file_ref("Leaf", "payload", other_digest),
+        },
+    )
+
+    expected = f"file://./components/{_extracted_name('Leaf', marker='payload')}"
+    assert tasks["a"]["componentRef"]["url"] == expected
+    assert tasks["b"]["componentRef"]["url"] == expected
+    assert len(list((tmp_path / "components").glob("*"))) == 1
+
+
+@pytest.mark.parametrize(
+    "name,extension,rejected",
+    [
+        ("\u754c" * 400, ".yaml", False),  # 3 bytes per character, so truncate on bytes
+        ("Leaf", "." + "e" * 190, False),  # address + extension exactly fills the limit
+        ("Leaf", "." + "e" * 191, True),  # one byte over, no valid name exists
+    ],
+)
+def test_extracted_filenames_respect_the_255_byte_limit(
+    tmp_path: Path, name: str, extension: str, rejected: bool
+) -> None:
+    dehydrator = PipelineDehydrator(
+        {"": DehydrateChoice.FILE},
+        output_file=tmp_path / "out.yaml",
+        component_extension=extension,
+    )
+    data = _pipeline({"a": _file_ref(name, "payload")})
+
+    if rejected:
+        with pytest.raises(ComponentFilenameTooLongError, match="component_extension"):
+            dehydrator.dehydrate(data)
+        assert not list((tmp_path / "components").glob("*")), "nothing may be written"
+        return
+
+    dehydrator.dehydrate(data)
+    written = list((tmp_path / "components").glob("*"))
+    assert len(written) == 1 and written[0].is_file()
+    assert len(written[0].name.encode("utf-8")) <= 255

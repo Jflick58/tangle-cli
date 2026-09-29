@@ -30,6 +30,48 @@ from .pipeline_hydrator import PipelineHydrator, ResolverContext, UriReader, Uri
 
 PATH_SEPARATOR = "|"  # Use | as separator since task names can contain dots.
 
+# Per-component filename limit shared by ext4, APFS and NTFS. It counts
+# BYTES, not characters, so a multi-byte stem has to be measured encoded.
+_MAX_FILENAME_BYTES = 255
+
+
+def _truncate_utf8(text: str, budget: int) -> str:
+    """Return the longest prefix of *text* that fits *budget* UTF-8 bytes.
+
+    Truncation lands on a character boundary: cutting the encoded form can
+    leave a partial multi-byte sequence, and dropping it keeps the result
+    decodable and deterministic.
+    """
+    if budget <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= budget:
+        return text
+    return encoded[:budget].decode("utf-8", "ignore")
+
+
+class ComponentFilenameError(RuntimeError):
+    """Base class for problems naming an extracted component file."""
+
+
+class ComponentFilenameCollisionError(ComponentFilenameError):
+    """Raised when two different component specs claim one extraction filename.
+
+    Unreachable while filenames carry a full content address; it exists so that
+    any future change which shortens or weakens the address fails loudly here
+    instead of silently overwriting a previously extracted component.
+    """
+
+
+class ComponentFilenameTooLongError(ComponentFilenameError):
+    """Raised when the configured extension leaves no room for a filename.
+
+    The separator, content address and extension are reserved before the
+    readable stem, so only an extension longer than the limit itself can make
+    a valid name impossible. Reported here rather than as an ``OSError`` from
+    whichever writer happened to receive the oversized path.
+    """
+
 
 @dataclass(frozen=True)
 class Jinja2ExportResult:
@@ -107,6 +149,7 @@ class PipelineDehydrator(TangleCliHandler):
 
         self.interactive = interactive
         self._saved_components: dict[str, Path | str] = {}
+        self._component_filenames: dict[str, str] = {}
         self._current_reference_file: Path | str | None = output_file
         self._io = PipelineHydrator(
             enable_resolution=False,
@@ -317,7 +360,7 @@ class PipelineDehydrator(TangleCliHandler):
                 new_task["componentRef"] = {"digest": resolved_digest}
                 self.log.info("   → Auto: Replaced with componentRef.digest (found in library)")
             else:
-                file_url = self._save_component_to_file(name, resolved_digest, spec)
+                file_url = self._save_component_to_file(name, spec)
                 new_task["componentRef"] = {"url": file_url}
                 self.log.info("   → Auto: Extracted to file (no URL, not in library or no client)")
         elif choice == DehydrateChoice.DIGEST:
@@ -330,7 +373,7 @@ class PipelineDehydrator(TangleCliHandler):
             new_task["componentRef"] = {"url": canonical_url}
             self.log.info("   → Replaced with componentRef.url")
         elif choice == DehydrateChoice.FILE:
-            file_url = self._save_component_to_file(name, resolved_digest, spec)
+            file_url = self._save_component_to_file(name, spec)
             new_task["componentRef"] = {"url": file_url}
             self.log.info(f"   → Extracted to {file_url}")
         else:
@@ -344,11 +387,46 @@ class PipelineDehydrator(TangleCliHandler):
         safe_name = "".join(c for c in safe_name if c.isalnum() or c == "_")
         return safe_name or fallback
 
-    def _save_component_to_file(self, name: str, digest: str, spec: dict[str, Any]) -> str:
-        """Save a component spec once and return a reference URL for this file."""
+    def _component_filename(self, name: str, address: str) -> str:
+        """Return ``<stem>-<address><extension>``, byte-bounded.
 
-        if digest not in self._saved_components:
-            filename = f"{self._safe_filename(name)}{self.component_extension}"
+        The readable stem takes whatever UTF-8 bytes the address and extension
+        leave; it is dropped, separator included, when nothing fits.
+        """
+        stemless = f"{address}{self.component_extension}"
+        required = len(stemless.encode("utf-8"))
+        if required > _MAX_FILENAME_BYTES:
+            raise ComponentFilenameTooLongError(
+                f"component_extension is too long to build a component filename: the "
+                f"content address and extension need {required} bytes, over the "
+                f"{_MAX_FILENAME_BYTES}-byte limit"
+            )
+        # The separator is charged here rather than reserved above, so an
+        # extension that fits by exactly one byte is not rejected.
+        stem = _truncate_utf8(self._safe_filename(name), _MAX_FILENAME_BYTES - required - 1)
+        if not stem:
+            return stemless
+        # ``_safe_filename`` folds ``-`` to ``_``, so this separator cannot
+        # occur inside the stem.
+        return f"{stem}-{stemless}"
+
+    def _save_component_to_file(self, name: str, spec: dict[str, Any]) -> str:
+        """Write a component spec once and return a reference URL for it."""
+
+        # Address the spec, never ``componentRef.digest``: that digest is a
+        # locator, not proof of content. The hydrator digests raw source TEXT,
+        # so equal specs can carry different valid digests, and an edited spec
+        # can still carry the stale digest of what it used to be.
+        address = utils.compute_spec_digest(spec)
+        if address not in self._saved_components:
+            filename = self._component_filename(name, address)
+            claimed_by = self._component_filenames.get(filename)
+            if claimed_by is not None and claimed_by != address:
+                raise ComponentFilenameCollisionError(
+                    f"extracted component filename {filename!r} is already taken by a "
+                    f"different component spec; refusing to overwrite it"
+                )
+            self._component_filenames[filename] = address
             destination = self._join_destination(self.components_dir, filename)
             self._write_text(destination, utils.dump_yaml(spec), kind="component")
             if self._is_local_destination(destination):
@@ -356,8 +434,8 @@ class PipelineDehydrator(TangleCliHandler):
                 if destination_text.startswith("file://"):
                     destination_text = destination_text[7:]
                 destination = Path(destination_text).resolve()
-            self._saved_components[digest] = destination
-        return self._make_ref_url(self._saved_components[digest])
+            self._saved_components[address] = destination
+        return self._make_ref_url(self._saved_components[address])
 
     def _make_ref_url(self, target: Path | str) -> str:
         """Create a componentRef URL for a saved target."""
