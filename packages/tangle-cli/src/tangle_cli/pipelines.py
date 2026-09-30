@@ -60,6 +60,17 @@ class LayoutResult:
 
 
 @dataclass(frozen=True)
+class DehydrateResult:
+    """Summary of a dehydrate operation."""
+
+    output_path: Path
+    mode: str
+    components_dir: Path | None
+    extracted_components: int
+    resolve_config: Path | None
+
+
+@dataclass(frozen=True)
 class HydrateResult:
     """Summary of a hydrate operation."""
 
@@ -242,6 +253,96 @@ def hydrate_pipeline_file(
         content=hydrated.content,
         output_path=output_path,
         resolved_components=hydrated.resolved_count,
+    )
+
+
+DEHYDRATE_MODES = ("auto", "digest", "name", "url", "file")
+
+
+def _local_path(value: str | Path, what: str) -> Path:
+    """This command is local-path-only; refuse URIs before ``Path`` mangles them.
+
+    ``Path("gs://b/x")`` collapses to ``gs:/b/x``, a relative LOCAL path, so the
+    check must run on the raw string. The rule matches the engine's own URI
+    detection (``://``), so a Windows ``C:\\dir`` path is still local. The value
+    itself is not echoed: a URI may carry credentials.
+    """
+    if isinstance(value, str) and "://" in value:
+        scheme = value.split("://", 1)[0]
+        raise PipelineValidationError(f"{what} must be a local path; {scheme}:// URIs are not supported")
+    return Path(value)
+
+
+def dehydrate_pipeline_file(
+    pipeline_path: str | Path,
+    *,
+    output: str | Path,
+    mode: str = "auto",
+    components_dir: str | Path | None = None,
+    client: Any | None = None,
+    logger: Any | None = None,
+    base_url: str | None = None,
+) -> DehydrateResult:
+    """Dehydrate a local pipeline YAML with the shared ``PipelineDehydrator``.
+
+    Noninteractive: ``mode`` applies to every component. Input, output and
+    components directory must all be local paths. Without ``client``, one is
+    created lazily -- against ``base_url`` when given -- only if a lookup needs it.
+    """
+
+    from .pipeline_dehydrator import (
+        ComponentFilenameError,
+        DehydrateChoice,
+        PipelineDehydrator,
+        ResolveManifestUnavailableError,
+    )
+
+    choices = {
+        "auto": DehydrateChoice.AUTO,
+        "digest": DehydrateChoice.DIGEST,
+        "name": DehydrateChoice.NAME,
+        "url": DehydrateChoice.URL,
+        "file": DehydrateChoice.FILE,
+    }
+    if mode not in choices:
+        raise PipelineValidationError(
+            f"Unknown dehydrate mode {mode!r}; expected one of {', '.join(DEHYDRATE_MODES)}"
+        )
+    source = _local_path(pipeline_path, "pipeline path")
+    output_path = _local_path(output, "--output")
+    bundle = _local_path(components_dir, "--components-dir") if components_dir is not None else None
+    # Strict on purpose: the dehydrator's own loader turns null/false/0/[]/"" into
+    # an empty mapping and would write ``{}``.
+    data = load_pipeline_file(source)
+
+    def create_client() -> Any:
+        from .client import TangleApiClient
+
+        return TangleApiClient(base_url=base_url, logger=logger)
+
+    dehydrator = PipelineDehydrator(
+        {"": choices[mode]},
+        components_dir=bundle,
+        output_file=output_path,
+        client=client,
+        client_factory=create_client if client is None and base_url is not None else None,
+        logger=logger,
+        base_url=base_url,
+    )
+    try:
+        dehydrator.write_file(dehydrator.dehydrate(data), output_path)
+    except (ComponentFilenameError, ResolveManifestUnavailableError) as exc:
+        raise PipelineValidationError(str(exc)) from exc
+
+    # Report only what THIS run wrote; a sidecar or bundle from an earlier run
+    # with a different mode may still be on disk.
+    extracted = len(dehydrator._saved_components)
+    return DehydrateResult(
+        output_path=output_path,
+        mode=mode,
+        components_dir=Path(str(dehydrator.components_dir)) if extracted else None,
+        extracted_components=extracted,
+        resolve_config=dehydrator._manifest_path() if dehydrator._resolve_manifest else None,
     )
 
 

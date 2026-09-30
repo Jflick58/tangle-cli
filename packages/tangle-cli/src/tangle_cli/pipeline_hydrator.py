@@ -943,11 +943,30 @@ class PipelineHydrator(TangleCliHandler):
         path: str,
         base_dir: Path | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
-        """Resolve a component from a parsed resolve config."""
+        """Resolve a component from a parsed resolve config.
+
+        An entry marked ``fallback_on_error: true`` that raises is treated as a
+        miss when a later entry exists, so a generated ``[primary, local]``
+        list stays usable offline. Unmarked, single and last entries still
+        propagate their errors.
+        """
         entries = config if isinstance(config, list) else [config]
         for i, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 self.log.warn(f"   ⚠️ Resolve config entry {i} is not a dict, skipping")
+                continue
+            if entry.get("fallback_on_error") is True and i < len(entries) - 1:
+                try:
+                    result = self._try_resolve_entry(entry, path, base_dir)
+                except Exception as exc:
+                    # Type only: the message may carry a URL or response body.
+                    self.log.warn(
+                        f"   ⚠️ Resolve config entry {i} failed at {path} "
+                        f"({type(exc).__name__}); trying the next entry"
+                    )
+                    continue
+                if result is not None:
+                    return result
                 continue
             result = self._try_resolve_entry(entry, path, base_dir)
             if result is not None:

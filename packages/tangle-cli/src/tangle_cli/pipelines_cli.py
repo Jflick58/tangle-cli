@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pathlib
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from cyclopts import App, Parameter
 
@@ -26,6 +26,7 @@ from .logger import logger_for_log_type
 from .pipelines import (
     PipelineValidationError,
     compile_pipeline_file,
+    dehydrate_pipeline_file,
     generate_mermaid,
     hydrate_pipeline_file,
     layout_pipeline_file,
@@ -229,6 +230,95 @@ def pipelines_hydrate(
             f"Hydrated {pipeline_path} -> {result.output_path} "
             f"({result.resolved_components} component(s) resolved)."
         )
+
+
+@app.command(name="dehydrate")
+def pipelines_dehydrate(
+    # ``str``, not ``Path``: Path("gs://b/x") collapses to the LOCAL path
+    # gs:/b/x, which would hide a URI from the local-path-only check.
+    pipeline_path: str,
+    *,
+    output: Annotated[
+        str | None,
+        Parameter(
+            name="--output",
+            alias="-o",
+            help="Local output path for the dehydrated pipeline YAML (required).",
+        ),
+    ] = None,
+    mode: Annotated[
+        Literal["auto", "digest", "name", "url", "file"] | None,
+        Parameter(
+            name="--mode",
+            help=(
+                "How to replace inline component specs. auto: canonical URL, else a "
+                "verified published digest, else a local file. digest/name: a "
+                "verified digest or owner-pinned name with a local fallback, via a "
+                "<output stem>.components.yaml resolve config. url: canonical URL. "
+                "file: always a local file. Default: auto."
+            ),
+        ),
+    ] = None,
+    components_dir: Annotated[
+        str | None,
+        Parameter(
+            name="--components-dir",
+            help="Where extracted component files go. Defaults to components/ beside the output.",
+        ),
+    ] = None,
+    base_url: BaseUrlOption = None,
+    token: TokenOption = None,
+    auth_header: AuthHeaderOption = None,
+    header: HeaderOption = None,
+    config: ConfigOption = None,
+    log_type: LogTypeOption = "console",
+) -> None:
+    """Dehydrate inline component specs in a local pipeline YAML file."""
+
+    config_values = load_config_or_exit(config)
+    resolved_output = output or _optional_str(config_values.get("output"))
+    if resolved_output is None:
+        raise SystemExit("--output is required: dehydration writes files beside the output.")
+    config_base_url = _optional_str(config_values.get("base_url"))
+    resolved_base_url = base_url if base_url is not None else config_base_url
+    include_env_credentials = not (base_url is None and config_base_url is not None)
+    resolved_token = token if token is not None else _optional_str(config_values.get("token"))
+    resolved_auth_header = (
+        auth_header if auth_header is not None else _optional_str(config_values.get("auth_header"))
+    )
+    resolved_mode = mode if mode is not None else (_optional_str(config_values.get("mode")) or "auto")
+
+    logger, finalize_logs = logger_for_log_type(log_type)
+    try:
+        result = dehydrate_pipeline_file(
+            pipeline_path,
+            output=resolved_output,
+            mode=resolved_mode,
+            components_dir=components_dir or _optional_str(config_values.get("components_dir")),
+            base_url=resolved_base_url,
+            logger=logger,
+            # Lazy: a network or auth failure during verification degrades to a
+            # local copy, while a malformed --header/--auth-header still exits.
+            client=LazyTangleApiClient(
+                command_name="pipeline dehydration with published-component verification",
+                base_url=resolved_base_url,
+                token=resolved_token,
+                auth_header=resolved_auth_header,
+                header=_header_entries(header, config_values),
+                include_env_credentials=include_env_credentials,
+                logger=logger,
+            ),
+        )
+    except PipelineValidationError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        finalize_logs()
+
+    print(f"Dehydrated {pipeline_path} -> {result.output_path} (mode: {result.mode}).")
+    if result.resolve_config is not None:
+        print(f"  Resolve config: {result.resolve_config}")
+    if result.components_dir is not None:
+        print(f"  Components: {result.extracted_components} file(s) in {result.components_dir}")
 
 
 @app.command(name="compile")
