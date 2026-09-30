@@ -168,6 +168,7 @@ uv run tangle sdk pipelines validate pipeline.yaml
 uv run tangle sdk pipelines diagram pipeline.yaml
 uv run tangle sdk pipelines layout pipeline.yaml --recursive
 uv run tangle sdk pipelines hydrate pipeline.yaml --output hydrated.yaml
+uv run tangle sdk pipelines dehydrate hydrated.yaml --output pipeline.yaml
 uv run tangle sdk components generate from-python path/to/component.py --image python:3.12
 uv run tangle sdk components bump-version path/to/component.yaml
 ```
@@ -488,9 +489,24 @@ Local pipeline commands live under `sdk pipelines`:
 ```bash
 uv run tangle sdk pipelines validate pipeline.yaml
 uv run tangle sdk pipelines hydrate pipeline.yaml --output hydrated.yaml
+uv run tangle sdk pipelines dehydrate hydrated.yaml --output pipeline.yaml
 uv run tangle sdk pipelines diagram pipeline.yaml
 uv run tangle sdk pipelines layout pipeline.yaml --recursive
 ```
+
+`pipelines dehydrate` is the inverse of `hydrate`. It replaces inline component specs with references, using the same noninteractive dehydrator as `pipeline-runs export --dehydrate`, and a single `--mode` applies to every component:
+
+| `--mode` | Each inline component becomes |
+| --- | --- |
+| `auto` (default) | its canonical URL; else a published digest whose own spec matches; else a local file |
+| `digest` | a verified digest with a local fallback, via `<output stem>.components.yaml` |
+| `name` | an owner-pinned published name with a local fallback, via `<output stem>.components.yaml` |
+| `url` | its canonical URL (a component without one falls back to `digest`) |
+| `file` | always a local file |
+
+Every mode fully dehydrates nested graphs. `auto`, `url` and `file` extract each inline subgraph to a local file under `subgraphs/` beside the output; a subgraph has no canonical URL of its own, so under `url` it too becomes a portable local file. Subgraph filenames are `<name>-<content digest>.yaml`, addressing the subgraph exactly as written. As a result, identical subgraphs share one file, a subgraph that differs only in an annotation gets its own file, and several outputs dehydrated into one directory cannot overwrite each other's subgraphs. `digest` and `name` extract subgraphs into the components directory, behind the same resolve config. The leaves inside a subgraph follow the chosen mode as usual.
+
+`--output` is required. The input, `--output` and `--components-dir` must all be local paths: URIs such as `gs://`, `https://` or `file://` are refused before anything is written. A file whose YAML is not a mapping, including an empty or `null` document, is refused too, rather than being written out as `{}`. Extracted files go to `components/` beside the output unless `--components-dir` is given. Verification uses `--base-url`/`--token`/`--auth-header`/`--header`/`--config`, and the client is created only when a lookup is needed. An unreachable or unauthorized library degrades to local copies, but a malformed `--header` or `--auth-header` exits with an error instead of silently shipping local-only output. Verification uses the client's normal timeouts and retries, so an unreachable library can delay each fallback. See [Resolve-config fallback entries](#resolve-config-fallback-entries) for what `digest` and `name` emit and guarantee.
 
 Pipeline run API/submit commands live under `sdk pipeline-runs`:
 
@@ -1136,6 +1152,30 @@ register_component_resolver("catalog", resolve_from_catalog)
 Resolvers receive the hydrator instance, the reference value, a display path, and the current base directory. They can use `hydrator._api_client()` for API-backed lookups, `hydrator.log` for progress logs, and `hydrator.resolution_overrides` for template/config variables. There is also an instance method `hydrator.register_component_resolver(...)` for per-hydrator overrides. Built-in kinds include `digest`, `name`, `url`, `file`, `resolve`, `http`, `https`, `local`, and `local_from_python`.
 
 Downstream-only features such as Docker/from-container materialization or cloud storage can be added by registering new resolvers while the OSS default remains explicit about unsupported kinds.
+
+#### Resolve-config fallback entries
+
+A resolve-config fragment may be an ordered list; the first entry that resolves wins. An entry that *raises* normally fails the hydration. An entry marked `fallback_on_error: true` is instead treated as a miss when a later entry exists, so the next one is tried. That particular warning names only the entry index and exception type; other hydration warnings are unchanged and may include exception text. Unmarked entries, single-entry fragments and the last entry always propagate their errors, so hand-authored configs behave exactly as before.
+
+```yaml
+l-501c7f02…:
+  - digest: 501c7f02…
+    fallback_on_error: true
+  - local: ./components/l-501c7f02….yaml
+```
+
+The dehydrator's explicit `digest` and `name` choices emit exactly this shape into `<output stem>.components.yaml` and reference it as `resolve://./<stem>.components.yaml#<fragment>`. A fragment identifies the whole entry list, so the same component reached through different verified primaries gets separate fragments that share one local copy.
+
+- **The primary is emitted only when verified.** A digest's *own* published spec must be semantically equal to the inline one; the digests themselves are never compared, because a published digest usually addresses the component's source text. For `name`, the component's digest is inspected (`ComponentInspector.inspect_by_digest`). Its spec must match, and it must have a published name and a non-symbolic `published_by`. The published name is emitted with that `publisher` pinned, so another author's same-named component cannot resolve. Otherwise the fragment is the local copy alone.
+- **`name` pins the author, not the version.** Hydration resolves that owner's latest candidate, which may be a newer version or the `[Official]`-prefixed name.
+- **Deprecation successors are followed, by design.** Hydration follows a digest's successor even when the successor's content differs. This applies to `digest`, `name` and `auto` alike. The local copy covers *availability*, a library that is unreachable or no longer has the component; it does not pin content or version.
+- **A local copy is always written**, content-addressed under the components directory, so the output stays usable when the library is unreachable or the component is later unpublished.
+- **Nested graphs are fully dehydrated** into the same manifest.
+- **A local output file and components directory are required.** Without them there is nowhere portable to write, so dehydration raises `ResolveManifestUnavailableError` instead of writing into the working directory.
+
+`auto` also verifies content: a published digest whose own spec is a different component is treated as a library miss, and the component is extracted to a file.
+
+Each dehydration call starts with fresh extraction state. When one dehydrator instance is reused for several outputs, each output writes its own local copies and never references another output's bundle.
 
 ### Pipeline run hooks
 

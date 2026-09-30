@@ -969,7 +969,8 @@ def test_pipeline_runs_export_can_dehydrate_pipeline(monkeypatch, tmp_path: Path
 
         def get_component_spec(self, digest: str) -> dict[str, Any]:
             self.spec_lookups.append(digest)
-            return {"name": "published"}
+            # The real published spec: AUTO verifies what a digest resolves to.
+            return {"name": "Step", "version": "1.0.0"}
 
     app = cli.build_app()
     fake_client = ExportClient()

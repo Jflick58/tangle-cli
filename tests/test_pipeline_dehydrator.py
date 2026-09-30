@@ -68,7 +68,13 @@ def _extract(tmp_path: Path, tasks: dict[str, Any], **kwargs: Any) -> dict[str, 
 
 
 class FakeClient:
-    def __init__(self, found: set[str]) -> None:
+    """A library whose published digests resolve to real specs.
+
+    It returns the genuine spec rather than a placeholder: AUTO now checks
+    that a digest resolves to the component in hand, not merely that it exists.
+    """
+
+    def __init__(self, found: dict[str, dict[str, Any]]) -> None:
         self.found = found
         self.calls: list[str] = []
 
@@ -76,17 +82,32 @@ class FakeClient:
         self.calls.append(digest)
         if digest not in self.found:
             raise KeyError(digest)
-        return {"name": "found"}
+        return self.found[digest]
+
+    def resolve_digest(self, digest: str) -> str:
+        return digest
+
+    def find_existing_components(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    def list_published_component_infos(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
 
 
 def test_pipeline_dehydrator_replaces_refs_by_explicit_choice(tmp_path: Path) -> None:
     data = _pipeline({"task": _task("Leaf Component", "digest-1", canonical_url="https://example.test/leaf.yaml")})
 
-    digest_result = PipelineDehydrator({"": DehydrateChoice.DIGEST}, output_file=tmp_path / "out.yaml").dehydrate(data)
-    assert digest_result["implementation"]["graph"]["tasks"]["task"]["componentRef"] == {"digest": "digest-1"}
-
-    name_result = PipelineDehydrator({"": DehydrateChoice.NAME}, output_file=tmp_path / "out.yaml").dehydrate(data)
-    assert name_result["implementation"]["graph"]["tasks"]["task"]["componentRef"] == {"name": "Leaf Component"}
+    # DIGEST and NAME always emit a portable resolve ref; with nothing
+    # published the manifest fragment is the local copy alone.
+    for choice in (DehydrateChoice.DIGEST, DehydrateChoice.NAME):
+        result = PipelineDehydrator(
+            {"": choice}, output_file=tmp_path / "out.yaml", client=FakeClient({})
+        ).dehydrate(data)
+        ref = result["implementation"]["graph"]["tasks"]["task"]["componentRef"]
+        assert ref["url"].startswith("resolve://./out.components.yaml#")
+        fragment = ref["url"].split("#", 1)[1]
+        manifest = yaml.safe_load((tmp_path / "out.components.yaml").read_text(encoding="utf-8"))
+        assert manifest[fragment] == [{"local": f"./components/{fragment}.yaml"}]
 
     url_result = PipelineDehydrator({"": DehydrateChoice.URL}, output_file=tmp_path / "out.yaml").dehydrate(data)
     assert url_result["implementation"]["graph"]["tasks"]["task"]["componentRef"] == {
@@ -182,7 +203,7 @@ def test_pipeline_dehydrator_auto_with_url_does_not_create_client(
 def test_pipeline_dehydrator_auto_lazily_creates_client_for_library_lookup(tmp_path: Path) -> None:
     """Auto mode creates a default client only when a library lookup is needed."""
 
-    client = FakeClient({"digest-found"})
+    client = FakeClient({"digest-found": _leaf_spec("Published")})
 
     class LazyDehydrator(PipelineDehydrator):
         def _get_client(self):
@@ -228,7 +249,7 @@ def test_pipeline_dehydrator_auto_uses_url_digest_then_file(tmp_path: Path) -> N
             "local": _task("Local Only", "digest-missing"),
         }
     )
-    client = FakeClient({"digest-found"})
+    client = FakeClient({"digest-found": _leaf_spec("Published")})
 
     result = PipelineDehydrator(
         {"": DehydrateChoice.AUTO},
@@ -255,11 +276,14 @@ def test_pipeline_dehydrator_auto_extracts_subgraphs_and_rewrites_relative_urls(
 
     result = PipelineDehydrator({"": DehydrateChoice.AUTO}, output_file=tmp_path / "out.yaml").dehydrate(data)
 
-    nested_ref = result["implementation"]["graph"]["tasks"]["nested"]["componentRef"]
-    assert nested_ref == {"url": "file://./subgraphs/nested_subgraph_0.yaml"}
+    from tangle_cli.utils import compute_spec_digest
 
-    subgraph_file = tmp_path / "subgraphs" / "nested_subgraph_0.yaml"
+    nested_ref = result["implementation"]["graph"]["tasks"]["nested"]["componentRef"]
+    (subgraph_file,) = (tmp_path / "subgraphs").glob("*.yaml")
     subgraph = yaml.safe_load(subgraph_file.read_text(encoding="utf-8"))
+    # The name addresses the subgraph as actually written, not a run counter.
+    assert subgraph_file.name == f"nested_subgraph-{compute_spec_digest(subgraph)}.yaml"
+    assert nested_ref == {"url": f"file://./subgraphs/{subgraph_file.name}"}
     extracted = _extracted_name("Inner Leaf")
     assert subgraph["implementation"]["graph"]["tasks"]["leaf"]["componentRef"] == {
         "url": f"file://./../components/{extracted}"
