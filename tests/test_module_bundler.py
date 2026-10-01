@@ -15,6 +15,7 @@ import textwrap
 import zlib
 from pathlib import Path
 
+import pytest
 import tangle_cli
 from tangle_cli.module_bundler import (
     ModuleBundler,
@@ -25,9 +26,9 @@ from tangle_cli.module_bundler import (
 )
 
 
-def _decode(encoded: str) -> dict[str, str]:
+def _decode(b64: str) -> dict[str, str]:
     """Mirror of the runtime injection's decompress step."""
-    return json.loads(bz2.decompress(base64.b85decode(encoded)))
+    return json.loads(zlib.decompress(base64.b64decode(b64)))
 
 
 class TestEncodedPayload:
@@ -41,23 +42,39 @@ class TestEncodedPayload:
 
     def test_round_trips_realistic_sources(self):
         sources = self._realistic_sources()
-        encoded = ModuleBundler.encode(sources)
+        encoded = ModuleBundler.encode(sources, mode="bundle-bz2")
         assert encoded is not None
-        assert _decode(encoded) == {name: sources[name] for name in _topological_order(sources)}
+        decoded = json.loads(bz2.decompress(base64.b85decode(encoded)))
+        assert decoded == {name: sources[name] for name in _topological_order(sources)}
 
-    def test_is_safe_inside_the_emitted_string_literal(self):
-        encoded = ModuleBundler.encode(self._realistic_sources())
-        assert encoded is not None
-        assert not set(encoded) & {"'", '"', "\\", "\n"}
-        assert repr(encoded) == f"'{encoded}'"
+    def test_default_retains_zlib_base64(self):
+        sources = {"helper": "VALUE = 42\n"}
+        legacy = base64.b64encode(zlib.compress(json.dumps(sources).encode(), level=9)).decode("ascii")
+        assert ModuleBundler.encode(sources) == legacy
+        assert ModuleBundler.encode(sources, mode="bundle") == legacy
+        injection = ModuleBundler.build_injection(bundled_modules_b64=legacy)
+        assert f"zlib.decompress(base64.b64decode({legacy!r}))" in injection
+        assert "bz2" not in injection
 
-    def test_is_smaller_than_zlib_base64(self):
+    def test_escaped_injection_is_smaller_than_zlib_base64(self):
         sources = self._realistic_sources()
-        encoded = ModuleBundler.encode(sources)
-        assert encoded is not None
-        ordered = {name: sources[name] for name in _topological_order(sources)}
-        legacy = base64.b64encode(zlib.compress(json.dumps(ordered).encode(), level=9))
-        assert len(encoded) < 0.85 * len(legacy)
+        encoded = ModuleBundler.encode(sources, mode="bundle-bz2")
+        legacy = ModuleBundler.encode(sources)
+        assert encoded is not None and legacy is not None
+        # Measure the actual emitted source, including escape overhead.
+        compact_injection = ModuleBundler.build_injection(encoded, mode="bundle-bz2")
+        legacy_injection = ModuleBundler.build_injection(legacy)
+        assert len(compact_injection) < 0.85 * len(legacy_injection)
+
+    @pytest.mark.parametrize("mode", ["bundle", "bundle-bz2"])
+    def test_empty_sources(self, mode):
+        assert ModuleBundler.encode({}, mode=mode) is None
+
+    def test_unknown_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported bundle mode"):
+            ModuleBundler.encode({"helper": "VALUE = 42\n"}, mode="unknown")
+        with pytest.raises(ValueError, match="Unsupported bundle mode"):
+            ModuleBundler.build_injection("encoded", mode="unknown")
 
 
 class TestTopologicalOrder:

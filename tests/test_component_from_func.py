@@ -642,7 +642,7 @@ class TestBuildComponentDict:
     def test_bundle_collects_imports_from_stripped_runtime_source_only(self, tmp_path):
         import base64
         import re as _re
-        import bz2
+        import zlib
 
         (tmp_path / "runtime_helper.py").write_text('VALUE = "runtime"\n', encoding="utf-8")
         (tmp_path / "tangle_deploy" / "python_pipeline").mkdir(parents=True)
@@ -686,9 +686,9 @@ class TestBuildComponentDict:
         with open(output_file) as f:
             component = yaml.safe_load(f)
         python_source = component["implementation"]["container"]["command"][-1]
-        match = _re.search(r"base64\.b85decode\('([^']+)'\)", python_source)
+        match = _re.search(r"base64\.b64decode\('([A-Za-z0-9+/=]+)'\)", python_source)
         assert match is not None
-        embedded = json.loads(bz2.decompress(base64.b85decode(match.group(1))))
+        embedded = json.loads(zlib.decompress(base64.b64decode(match.group(1))))
         assert "runtime_helper" in embedded
         assert "authoring_envs" not in embedded
 
@@ -704,7 +704,7 @@ class TestBuildComponentDict:
         ``AttributeError`` at component runtime.
         """
         import base64
-        import bz2
+        import zlib
 
         (tmp_path / "aaa.py").write_text(textwrap.dedent("""\
             import bbb
@@ -749,11 +749,11 @@ class TestBuildComponentDict:
         # quoted via ``repr`` in the source).
         import re as _re
 
-        # The injection emits ``base64.b85decode('<blob>')`` — the Base85
-        # alphabet never contains a single quote.
-        match = _re.search(r"base64\.b85decode\('([^']+)'\)", python_source)
-        assert match is not None, "injection snippet must contain an encoded blob"
-        embedded = json.loads(bz2.decompress(base64.b85decode(match.group(1))))
+        # The injection emits ``base64.b64decode('<b64>')`` — the b64
+        # alphabet is ``[A-Za-z0-9+/=]``, never a single quote.
+        match = _re.search(r"base64\.b64decode\('([A-Za-z0-9+/=]+)'\)", python_source)
+        assert match is not None, "injection snippet must contain a b64 blob"
+        embedded = json.loads(zlib.decompress(base64.b64decode(match.group(1))))
         order = list(embedded.keys())
 
         assert order.index("bbb") < order.index("aaa"), f"bbb must execute before aaa (got order: {order})"
@@ -1086,7 +1086,7 @@ class TestEndToEnd:
         the bundle crashes at runtime with ImportError.
         """
         import base64
-        import bz2
+        import zlib
 
         # mylib/__init__.py imports helpers; component only imports mylib.core
         (tmp_path / "mylib").mkdir()
@@ -1108,7 +1108,7 @@ class TestEndToEnd:
         # dependency in the embedded dict (issue #30197).
         b64 = ModuleBundler.encode(sources)
         assert b64 is not None
-        order = list(json.loads(bz2.decompress(base64.b85decode(b64))).keys())
+        order = list(json.loads(zlib.decompress(base64.b64decode(b64))).keys())
         assert order.index("mylib.helpers") < order.index(
             "mylib"
         ), f"mylib.helpers must execute before mylib (got order: {order})"
